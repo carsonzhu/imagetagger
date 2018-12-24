@@ -7,25 +7,30 @@ from django.db.models import Count, Q
 from django.db.models.expressions import F
 from django.views.decorators.http import require_http_methods
 from django.urls import reverse
-from django.http import HttpResponseForbidden, HttpResponse, HttpResponseBadRequest, JsonResponse
+from django.http import HttpResponseForbidden, HttpResponse, HttpResponseBadRequest, JsonResponse, \
+    FileResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.response import TemplateResponse
 from django.utils.translation import ugettext_lazy as _
+from json import JSONDecodeError
 from rest_framework.decorators import api_view
 from rest_framework.exceptions import ParseError
 from rest_framework.response import Response
 from rest_framework.status import HTTP_403_FORBIDDEN, HTTP_200_OK, \
-    HTTP_201_CREATED
+    HTTP_201_CREATED, HTTP_202_ACCEPTED, HTTP_204_NO_CONTENT, HTTP_404_NOT_FOUND
 from PIL import Image as PIL_Image
 
 from imagetagger.images.serializers import ImageSetSerializer, ImageSerializer, SetTagSerializer
 from imagetagger.images.forms import ImageSetCreationForm, ImageSetCreationFormWT, ImageSetEditForm
 from imagetagger.users.forms import TeamCreationForm
 from imagetagger.users.models import User, Team
+from imagetagger.tagger_messages.forms import TeamMessageCreationForm
+
 from .models import ImageSet, Image, SetTag
 from .forms import LabelUploadForm
 from imagetagger.annotations.models import Annotation, Export, ExportFormat, \
     AnnotationType, Verification
+from imagetagger.tagger_messages.models import Message, TeamMessage, GlobalMessage
 
 import os
 import shutil
@@ -35,6 +40,7 @@ import zipfile
 import hashlib
 import json
 import imghdr
+from datetime import date, timedelta
 
 
 @login_required
@@ -80,6 +86,8 @@ def index(request):
 
     # needed to show the list of the users imagesets
     userteams = Team.objects.filter(members=request.user)
+    # get all teams where the user is an admin
+    user_admin_teams = Team.objects.filter(memberships__user=request.user, memberships__is_admin=True)
     imagesets = ImageSet.objects.filter(team__in=userteams).annotate(
         image_count_agg=Count('images')
     ).select_related('team').prefetch_related('set_tags') \
@@ -119,14 +127,47 @@ def index(request):
         'active_teams': team_stats.get('active_count', 0) or 0,
         'annotation_types': annotation_types[:3],
     }
-    return TemplateResponse(
-        request, 'images/index.html', {
-            'team_creation_form': team_creation_form,
-            'imageset_creation_form': imageset_creation_form,
-            'image_sets': imagesets,
-            'userteams': userteams,
-            'stats': stats,
+
+    global_annoucements = Message.in_range(GlobalMessage.get(request.user).filter(~Q(read_by=request.user)))
+
+    # Inits message creation form
+    team_message_creation_form = TeamMessageCreationForm(
+        initial={
+            'start_time': str(date.today()),
+            'expire_time': str(date.today() + timedelta(days=settings.DEFAULT_EXPIRE_TIME)),
         })
+
+    team_message_creation_form.fields['team'].queryset = user_admin_teams
+
+    # Gets all unread messages
+    usermessages = Message.in_range(TeamMessage.get_messages_for_user(request.user)).filter(~Q(read_by=request.user))
+
+    too_many_massages = False
+
+    front_page_messages = 5
+
+    if usermessages.count() > front_page_messages:
+        usermessages = usermessages[:front_page_messages]
+        too_many_massages = True
+
+    many_annoucements = False
+    if global_annoucements.count() > 5:
+        many_annoucements = True
+
+    return TemplateResponse(request, 'images/index.html', {
+        'user': request.user,
+        'team_creation_form': team_creation_form,
+        'imageset_creation_form': imageset_creation_form,
+        'team_message_creation_form': team_message_creation_form,
+        'image_sets': imagesets,
+        'user_has_admin_teams': user_admin_teams.exists(),
+        'userteams': userteams,
+        'stats': stats,
+        'usermessages': usermessages,
+        'too_many_messages': too_many_massages,
+        'many_annoucements': many_annoucements,
+        'global_annoucements': global_annoucements,
+    })
 
 
 @login_required
@@ -312,15 +353,17 @@ def view_image(request, image_id):
     image = get_object_or_404(Image, id=image_id)
     if not image.image_set.has_perm('read', request.user):
         return HttpResponseForbidden()
-    if settings.USE_NGINX_IMAGE_PROVISION:
-        response = HttpResponse()
-        response["Content-Disposition"] = "attachment; filename={0}".format(
-            image.name)
-        response['X-Accel-Redirect'] = "/ngx_static_dn/{0}".format(image.relative_path())
-        return response
-    with open(os.path.join(settings.IMAGE_PATH, image.path()), "rb") as f:
-        return HttpResponse(f.read(), content_type="image/jpeg")
 
+    file_path = os.path.join(settings.IMAGE_PATH, image.path())
+
+    if settings.USE_NGINX_IMAGE_PROVISION:
+        response = HttpResponse(content_type='image')
+        response['X-Accel-Redirect'] = "/ngx_static_dn/{}".format(image.relative_path())
+    else:
+        response =  FileResponse(open(file_path, 'rb'), content_type="image")
+
+    response["Content-Length"] = os.path.getsize(file_path)
+    return response
 
 @login_required
 def list_images(request, image_set_id):
@@ -408,6 +451,7 @@ def view_imageset(request, image_set_id):
         'export_formats': ExportFormat.objects.filter(Q(public=True) | Q(team__in=user_teams)),
         'label_upload_form': LabelUploadForm(),
         'upload_notice': settings.UPLOAD_NOTICE,
+        'enable_zip_download': settings.ENABLE_ZIP_DOWNLOAD,
     })
 
 
@@ -588,7 +632,7 @@ def label_upload(request, imageset_id):
                     else:
                         try:
                             vector = json.loads(line_frags[2])
-                        except Exception as error:
+                        except JSONDecodeError:
                             report_list.append("In image \"{}\" the annotation:"
                                                " \"{}\" was not accepted as valid JSON".format(line_frags[0], line_frags[2]))
 
@@ -650,6 +694,42 @@ def dl_script(request):
     return TemplateResponse(request, 'images/download.py', context={
                             'base_url': settings.DOWNLOAD_BASE_URL,
                             }, content_type='text/plain')
+
+
+def download_imageset_zip(request, image_set_id):
+    """
+    Get a zip archive containing the images of the imageset with id image_set_id.
+    If the zip file generation is still in progress, a HTTP status 202 (ACCEPTED) is returned.
+    For empty image sets, status 204 (NO CONTENT) is returned instead of an empty zip file.
+    """
+    image_set = get_object_or_404(ImageSet, id=image_set_id)
+
+    if not settings.ENABLE_ZIP_DOWNLOAD:
+        return HttpResponse(status=HTTP_404_NOT_FOUND)
+
+    if not image_set.has_perm('read', request.user):
+        return HttpResponseForbidden()
+
+    if image_set.image_count == 0:
+        # It should not be possible to download empty image sets. This
+        # is already blocked in the UI, but it should also be checked
+        # on the server side.
+        return HttpResponse(status=HTTP_204_NO_CONTENT)
+
+    if image_set.zip_state != ImageSet.ZipState.READY:
+        return HttpResponse(content=b'Imageset is currently processed', status=HTTP_202_ACCEPTED)
+
+    file_path = os.path.join(settings.IMAGE_PATH, image_set.zip_path())
+
+    if settings.USE_NGINX_IMAGE_PROVISION:
+        response = HttpResponse(content_type='application/zip')
+        response['X-Accel-Redirect'] = "/ngx_static_dn/{0}".format(image_set.zip_path())
+    else:
+        response = FileResponse(open(file_path, 'rb'), content_type='application/zip')
+
+    response['Content-Length'] = os.path.getsize(file_path)
+    response['Content-Disposition'] = "attachment; filename={}".format(image_set.zip_name())
+    return response
 
 
 @login_required

@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     'imagetagger.tools',
     'imagetagger.administration',
     'django.contrib.admin',
+    'imagetagger.tagger_messages',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
@@ -51,6 +52,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'django.middleware.locale.LocaleMiddleware',
 ]
 
 ROOT_URLCONF = 'imagetagger.urls'
@@ -142,3 +144,9 @@ IMAGE_EXTENSION = {
     'png',
     'jpeg',
 }
+
+# Sets the default expire time for new messages in days
+DEFAULT_EXPIRE_TIME = 7
+
+# Sets the default number of messages per page
+MESSAGES_PER_PAGE = 10

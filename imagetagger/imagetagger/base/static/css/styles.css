@@ -167,6 +167,32 @@ input.form-control[type="checkbox"] {
   margin: 2px;
 }
 
+.upper-bandage {
+  padding: 1px 3px;
+  position: absolute;
+  top: 0;
+  right: 0;
+  font-size : 70%;
+  background-color : red;
+}
+
+.upper-bandage-parent {
+  position: absolute; 
+  top: 50%; 
+  transform: translateY(-50%);
+  display: inline-block;
+  position: relative;
+  padding: 3px 10px;
+  color: #777;
+  text-decoration: none;
+}
+
+.upper-bandage-parent:hover {
+  color: #333;
+  text-decoration: none;
+}
+
+
 
 /* Autocomplete (from https://www.devbridge.com/sourcery/components/jquery-autocomplete/) */
 .autocomplete-suggestions {
@@ -225,4 +251,12 @@ body {
 
 .container .text-muted {
   margin: 20px 0;
+}
+
+.login-panel-footer {
+  margin-top: 1em;
+}
+
+.login-panel {
+  margin-top: 2em;
 }
